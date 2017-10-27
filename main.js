@@ -4,6 +4,7 @@ var fs = require('fs'); //Read Local files
 var inquirer = require('inquirer'); //Asks questions
 var csv = require('fast-csv'); //Parse CSV File
 var JSZip = require("jszip"); //Create Zip Files
+var clone = require('clone');
 
 var qFile = require('./questions.js')
 
@@ -193,7 +194,7 @@ function loginTrgt()
       console.log(errMsg);
     }else
     {
-        console.log('Success');
+        console.log('Success', r.result.serverUrl);
         trgtServerUrl = r.result.serverUrl;
         trgtSessionId = r.result.sessionId;
     }
@@ -202,11 +203,11 @@ function loginTrgt()
     sfSoapClient.setEndpoint(trgtServerUrl);
     sfSoapClient.addSoapHeader({SessionHeader:{sessionId:trgtSessionId}},'','tns');
 
-    trgtClient = sfSoapClient;
+    trgtClient =  sfSoapClient;
 
     if(opType == 'query')
     {
-      loginSrc(trgtClient);
+      loginSrc(trgtClient, clone(sfSoapClient));
     }else if(opType == 'csv')
     {
       retAttFromDisk();
@@ -217,7 +218,7 @@ function loginTrgt()
   })
 }
 
-function loginSrc(client)
+function loginSrc(trgtClient, client)
 {
   console.log('\nLogging into Source Org...');
 
@@ -237,7 +238,7 @@ function loginSrc(client)
         console.log(errMsg);
       }else
       {
-        console.log('Success');
+        console.log('Success', r.result.serverUrl);
   	    srcServerUrl = r.result.serverUrl;
   	    srcSessionId = r.result.sessionId;
 
@@ -246,8 +247,10 @@ function loginSrc(client)
       	client.addSoapHeader({SessionHeader:{sessionId:srcSessionId}},'','tns');
 
         srcClient = client;
+        console.log('\nSrc Org', srcClient.endpoint);
+        console.log('\ntrgt Org', trgtClient.endpoint);
 
-        queryOrg(srcClient,buildOrgQry());
+        queryOrg(srcClient, trgtClient, buildOrgQry());
       }
     }
   );
@@ -261,18 +264,20 @@ function buildOrgQry()
   return qryString;
 }
 
-function queryOrg(client,queryString)
+function queryOrg(srcClient, trgtClient, queryString)
 {
 
-	console.log('\nQuery Attachemnt Ids from Src Org');
+	console.log('\nQuery Attachemnt Ids from Src Org', srcClient.endpoint);
+  console.log('\nQuery Attachemnt Ids for trgt Org', trgtClient.endpoint);
 
-	client.SforceService.Soap.query({query:queryString},
+	srcClient.SforceService.Soap.query({query:queryString},
 	function(err,res)
 	{
 		var sObjIds = [];
 
     if(res.result.records != null)
     {
+      console.log('\n records found:', res.result.records.length);
 
   		for(var i=0;i<res.result.records.length;i++)
   		{
@@ -294,10 +299,11 @@ function queryOrg(client,queryString)
 
       if(opType == 'export')
       {
-        retAttFromSF(trgtClient,curRecSet);
+        retAttFromSF(srcClient, trgtClient, curRecSet);
       }else
       {
-		    retAttFromSF(srcClient,curRecSet);
+        console.log('/n reading attachment from salesforce');
+		    retAttFromSF(srcClient, trgtClient, curRecSet);
       }
     }else
     {
@@ -336,10 +342,10 @@ function qryMoreOrg(client,qryId)
 
     if(opType == 'export')
     {
-      retAttFromSF(trgtClient,curRecSet);
+      retAttFromSF(srcClient, trgtClient, curRecSet);
     }else
     {
-      retAttFromSF(srcClient,curRecSet);
+      retAttFromSF(srcClient, trgtClient, curRecSet);
     }
 
 	});
@@ -347,6 +353,7 @@ function qryMoreOrg(client,qryId)
 
 function retAttFromDisk()
 {
+  console.log('read attachment from disk');
   var recs = [];
   var myAtt = {};
 
@@ -414,16 +421,17 @@ function retAttFromDisk()
   }
 }
 
-function retAttFromSF(client,sObjIds)
+function retAttFromSF(srcClient, trgtClient, sObjIds)
 {
 	console.log('\nRetrieving Attachment body from SF');
-
+  console.log('\nRetrieving Attachment body from SF with src, ', srcClient.endpoint);
+  console.log('\nRetrieving Attachment body from SF with target, ', trgtClient.endpoint);
 	var retArgs = {};
 	retArgs.fieldList = 'Id,Name,ParentId,Body,ContentType';
 	retArgs.sObjectType = 'Attachment';
 	retArgs.ids = sObjIds;
 
-	client.SforceService.Soap.retrieve(retArgs,
+	srcClient.SforceService.Soap.retrieve(retArgs,
 	function(err,res)
 	{
 		//console.log(client.lastRequest);
@@ -509,32 +517,37 @@ function processZip(zipFile,attFiles)
 
 function processResult(res)
 {
-  var createResult = res.result;
+  console.log('result object::', res);
+  console.log('result object::statusCode', res.result);
 
-  var resultRows = '';
+  if (res !== undefined &&  res.result !== undefined ) { 
+      var createResult = res.result;
+      var resultRows = '';
+      for(i=0;i<createResult.length;i++)
+      {
+        if(createResult[i].success)
+        {
+          resultRows = resultRows + createResult[i].id + ',\r\n';
+        }else
+        {
+          resultRows = resultRows + ',' + createResult[i].errors[0].statusCode + ' - ' + createResult[i].errors[0].message + '\r\n';
+        }
+      }
 
-  for(i=0;i<createResult.length;i++)
-  {
-    if(createResult[i].success)
-    {
-      resultRows = resultRows + createResult[i].id + ',\r\n';
-    }else
-    {
-      resultRows = resultRows + ',' + createResult[i].errors[0].statusCode + ' - ' + createResult[i].errors[0].message + '\r\n';
-    }
+      fs.appendFile('results.csv', resultRows, function (err) {
+
+        if(opType == 'csv')
+        {
+          retAttFromDisk();
+        }else
+        {
+          processQryMore();
+        }
+
+      });
+  } else {
+
   }
-
-  fs.appendFile('results.csv', resultRows, function (err) {
-
-    if(opType == 'csv')
-    {
-      retAttFromDisk();
-    }else
-    {
-      processQryMore();
-    }
-
-  });
 }
 
 function processQryMore()
@@ -566,10 +579,10 @@ function processQryMore()
 
     if(opType == 'export')
     {
-      retAttFromSF(trgtClient,curRecSet);
+      retAttFromSF(srcClient, trgtClient, curRecSet);
     }else
     {
-      retAttFromSF(srcClient,curRecSet);
+      retAttFromSF(srcClient,trgtClient, curRecSet);
     }
   }else if(!qryMore)
   {
@@ -591,6 +604,9 @@ function processQryMore()
 function createAttInTrgt(client,recs)
 {
 	console.log('\nInserting Attacments');
+
+
+  console.log('\nInserting Attacments with client::', client.endpoint);
 
 	client.SforceService.Soap.create(recs,
 	function(err, response)
